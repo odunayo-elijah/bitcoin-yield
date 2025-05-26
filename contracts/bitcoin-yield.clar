@@ -85,3 +85,93 @@
 (define-private (is-valid-deposit-amount (amount uint))
   (and (> amount u0) (<= amount MAX-DEPOSIT-AMOUNT))
 )
+
+(define-private (is-contract-owner (sender principal))
+  (is-eq sender CONTRACT-OWNER)
+)
+
+;; PROTOCOL MANAGEMENT
+
+;; Adds a new yield protocol to the aggregator
+;; Only contract owner can add protocols to maintain security
+(define-public (add-protocol
+    (protocol-id uint)
+    (name (string-ascii 50))
+    (base-apy uint)
+    (max-allocation-percentage uint)
+  )
+  (begin
+    (asserts! (is-contract-owner tx-sender) ERR-UNAUTHORIZED)
+    (asserts! (is-valid-protocol-id protocol-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-protocol-name name) ERR-INVALID-INPUT)
+    (asserts! (is-valid-base-apy base-apy) ERR-INVALID-INPUT)
+    (asserts! (is-valid-allocation-percentage max-allocation-percentage)
+      ERR-INVALID-INPUT
+    )
+    (asserts! (< (var-get total-protocols) MAX-PROTOCOLS)
+      ERR-PROTOCOL-LIMIT-REACHED
+    )
+    (map-set supported-protocols { protocol-id: protocol-id } {
+      name: name,
+      base-apy: base-apy,
+      max-allocation-percentage: max-allocation-percentage,
+      active: true,
+    })
+    (var-set total-protocols (+ (var-get total-protocols) u1))
+    (ok true)
+  )
+)
+
+;; Deactivates a protocol for risk management purposes
+(define-public (deactivate-protocol (protocol-id uint))
+  (begin
+    (asserts! (is-contract-owner tx-sender) ERR-UNAUTHORIZED)
+    (asserts! (is-valid-protocol-id protocol-id) ERR-INVALID-INPUT)
+    (map-set supported-protocols { protocol-id: protocol-id }
+      (merge
+        (unwrap! (map-get? supported-protocols { protocol-id: protocol-id })
+          ERR-INVALID-PROTOCOL
+        ) { active: false }
+      ))
+    (var-set total-protocols (- (var-get total-protocols) u1))
+    (ok true)
+  )
+)
+
+;; DEPOSIT MANAGEMENT
+
+;; Deposits funds into a specified yield protocol
+;; Enforces allocation limits to maintain risk distribution
+(define-public (deposit
+    (protocol-id uint)
+    (amount uint)
+  )
+  (let (
+      (protocol (unwrap! (map-get? supported-protocols { protocol-id: protocol-id })
+        ERR-INVALID-PROTOCOL
+      ))
+      (current-total-deposits (default-to { total-deposit: u0 }
+        (map-get? protocol-total-deposits { protocol-id: protocol-id })
+      ))
+      (max-protocol-deposit (/ (* (get max-allocation-percentage protocol) BASE-DENOMINATION) u100))
+    )
+    (asserts! (is-valid-protocol-id protocol-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-deposit-amount amount) ERR-INVALID-INPUT)
+    (asserts! (get active protocol) ERR-INVALID-PROTOCOL)
+    (asserts!
+      (<= (+ (get total-deposit current-total-deposits) amount)
+        max-protocol-deposit
+      )
+      ERR-PROTOCOL-LIMIT-REACHED
+    )
+    (map-set user-deposits {
+      user: tx-sender,
+      protocol-id: protocol-id,
+    } {
+      amount: amount,
+      deposit-time: stacks-block-height,
+    })
+    (map-set protocol-total-deposits { protocol-id: protocol-id } { total-deposit: (+ (get total-deposit current-total-deposits) amount) })
+    (ok true)
+  )
+)
