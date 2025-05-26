@@ -175,3 +175,80 @@
     (ok true)
   )
 )
+
+;; YIELD CALCULATION
+
+;; Calculates accrued yield for a user's deposit in a specific protocol
+;; Uses time-based calculation based on Stacks block height
+(define-read-only (calculate-yield
+    (protocol-id uint)
+    (user principal)
+  )
+  (let (
+      (protocol (unwrap! (map-get? supported-protocols { protocol-id: protocol-id })
+        ERR-INVALID-PROTOCOL
+      ))
+      (user-deposit (unwrap!
+        (map-get? user-deposits {
+          user: user,
+          protocol-id: protocol-id,
+        })
+        ERR-INSUFFICIENT-FUNDS
+      ))
+      (blocks-since-deposit (- stacks-block-height (get deposit-time user-deposit)))
+      (annual-yield (/ (* (get base-apy protocol) (get amount user-deposit)) BASE-DENOMINATION))
+    )
+    (asserts! (is-valid-protocol-id protocol-id) ERR-INVALID-INPUT)
+    (ok (/ (* annual-yield blocks-since-deposit) BLOCKS-PER-YEAR))
+  )
+)
+
+;; WITHDRAWAL MANAGEMENT
+
+;; Withdraws principal and accrued yield from a protocol
+;; Automatically calculates and includes earned yield
+(define-public (withdraw
+    (protocol-id uint)
+    (amount uint)
+  )
+  (let (
+      (user-deposit (unwrap!
+        (map-get? user-deposits {
+          user: tx-sender,
+          protocol-id: protocol-id,
+        })
+        ERR-INSUFFICIENT-FUNDS
+      ))
+      (yield (unwrap! (calculate-yield protocol-id tx-sender) ERR-WITHDRAWAL-FAILED))
+      (current-protocol-deposits (default-to { total-deposit: u0 }
+        (map-get? protocol-total-deposits { protocol-id: protocol-id })
+      ))
+    )
+    (asserts! (is-valid-protocol-id protocol-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-deposit-amount amount) ERR-INVALID-INPUT)
+    (asserts! (>= (get amount user-deposit) amount) ERR-INSUFFICIENT-FUNDS)
+    (map-set user-deposits {
+      user: tx-sender,
+      protocol-id: protocol-id,
+    } {
+      amount: (- (get amount user-deposit) amount),
+      deposit-time: stacks-block-height,
+    })
+    (map-set protocol-total-deposits { protocol-id: protocol-id } { total-deposit: (- (get total-deposit current-protocol-deposits) amount) })
+    (ok (+ amount yield))
+  )
+)
+
+;; CONTRACT INITIALIZATION
+
+;; Initializes the contract with default Bitcoin Layer-2 yield protocols
+(define-public (initialize-protocols)
+  (begin
+    (try! (add-protocol u1 "Bitcoin Lightning Yield" u500 u20))
+    (try! (add-protocol u2 "Stacks Stacking Rewards" u750 u30))
+    (ok true)
+  )
+)
+
+;; Auto-initialize the contract upon deployment
+(try! (initialize-protocols))
